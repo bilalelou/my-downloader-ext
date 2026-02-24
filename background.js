@@ -26,6 +26,100 @@ function persistTab(tabId) {
     }
 }
 
+// ===== إعداد قواعد الترويسات للمواقع المعروفة =====
+async function setupHeaderRules() {
+    try {
+        // حذف القواعد القديمة أولاً
+        const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+        const existingIds = existingRules.map(r => r.id);
+
+        const rules = [
+            {
+                id: 1001,
+                priority: 1,
+                action: {
+                    type: 'modifyHeaders',
+                    requestHeaders: [
+                        { header: 'Referer', operation: 'set', value: 'https://www.youtube.com/' },
+                        { header: 'Origin', operation: 'set', value: 'https://www.youtube.com' }
+                    ]
+                },
+                condition: {
+                    requestDomains: ['googlevideo.com'],
+                    resourceTypes: ['xmlhttprequest', 'media', 'other']
+                }
+            },
+            {
+                id: 1002,
+                priority: 1,
+                action: {
+                    type: 'modifyHeaders',
+                    requestHeaders: [
+                        { header: 'Referer', operation: 'set', value: 'https://www.instagram.com/' },
+                        { header: 'Origin', operation: 'set', value: 'https://www.instagram.com' }
+                    ]
+                },
+                condition: {
+                    requestDomains: ['cdninstagram.com', 'fbcdn.net'],
+                    resourceTypes: ['xmlhttprequest', 'media', 'other']
+                }
+            },
+            {
+                id: 1003,
+                priority: 1,
+                action: {
+                    type: 'modifyHeaders',
+                    requestHeaders: [
+                        { header: 'Referer', operation: 'set', value: 'https://www.tiktok.com/' },
+                        { header: 'Origin', operation: 'set', value: 'https://www.tiktok.com' }
+                    ]
+                },
+                condition: {
+                    requestDomains: ['tiktokcdn.com', 'byteoversea.com'],
+                    resourceTypes: ['xmlhttprequest', 'media', 'other']
+                }
+            },
+            {
+                id: 1004,
+                priority: 1,
+                action: {
+                    type: 'modifyHeaders',
+                    requestHeaders: [
+                        { header: 'Referer', operation: 'set', value: 'https://twitter.com/' },
+                        { header: 'Origin', operation: 'set', value: 'https://twitter.com' }
+                    ]
+                },
+                condition: {
+                    requestDomains: ['twimg.com'],
+                    resourceTypes: ['xmlhttprequest', 'media', 'other']
+                }
+            }
+        ];
+
+        await chrome.declarativeNetRequest.updateDynamicRules({
+            removeRuleIds: existingIds,
+            addRules: rules
+        });
+    } catch (e) { /* ignore */ }
+}
+setupHeaderRules();
+
+// ===== تنظيف رابط YouTube للتحميل الكامل =====
+function cleanYoutubeUrl(url) {
+    try {
+        const u = new URL(url);
+        // حذف range parameter لتحميل الفيديو كامل
+        u.searchParams.delete('range');
+        // حذف rn (request number) لأنه متغير
+        u.searchParams.delete('rn');
+        // حذف rbuf
+        u.searchParams.delete('rbuf');
+        return u.toString();
+    } catch {
+        return url;
+    }
+}
+
 // ===== أنماط الاكتشاف =====
 
 // ملفات ميديا بالامتداد
@@ -333,6 +427,30 @@ function getSortedMedia(tabId) {
 
 // ===== التواصل مع popup =====
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+    // ===== تحميل ميديا مع ترويسات صحيحة =====
+    if (message.action === 'downloadMedia') {
+        const { url, filename, site } = message;
+
+        // تنظيف الرابط حسب الموقع
+        let cleanUrl = url;
+        if (site === 'youtube') {
+            cleanUrl = cleanYoutubeUrl(url);
+        }
+
+        chrome.downloads.download({
+            url: cleanUrl,
+            filename: filename || 'video.mp4'
+        }, (downloadId) => {
+            if (chrome.runtime.lastError) {
+                sendResponse({ success: false, error: chrome.runtime.lastError.message });
+            } else {
+                sendResponse({ success: true, downloadId });
+            }
+        });
+        return true;
+    }
+
     if (message.action === 'getCapturedMedia') {
         const tabId = message.tabId;
 
