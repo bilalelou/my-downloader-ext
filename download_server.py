@@ -124,7 +124,7 @@ class DownloadHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """معالجة طلبات التحميل"""
-        if self.path != "/download":
+        if self.path not in ("/download", "/playlist-info"):
             self._send_json(404, {"error": "not found"})
             return
 
@@ -154,10 +154,17 @@ class DownloadHandler(BaseHTTPRequestHandler):
             })
             return
 
+        # ===== معلومات البلايلست =====
+        if self.path == "/playlist-info":
+            self._handle_playlist_info(url, ytdlp_cmd)
+            return
+
         # خيارات التحميل
         quality = body.get("quality", "best")  # best, 720, 480, 360, audio
         site = body.get("site", "")
         title = body.get("title", "")
+        is_playlist = body.get("playlist", False)  # هل نحمّل بلايلست كاملة
+        playlist_items = body.get("playlist_items", "")  # e.g. "1-5" أو "" للكل
 
         # بناء أمر yt-dlp (ytdlp_cmd قد يكون ["yt-dlp.exe"] أو ["python", "-m", "yt_dlp"])
         cmd = list(ytdlp_cmd)
@@ -173,11 +180,18 @@ class DownloadHandler(BaseHTTPRequestHandler):
             cmd += ["-f", "best[ext=mp4]/best"]
 
         # مسار الحفظ
-        cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")]
+        if is_playlist:
+            # مجلد فرعي باسم البلايلست + ترقيم الفيديوهات
+            cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(playlist_title)s", "%(playlist_index)03d - %(title)s.%(ext)s")]
+            cmd += ["--yes-playlist"]
+            if playlist_items:
+                cmd += ["--playlist-items", playlist_items]
+        else:
+            cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")]
+            cmd += ["--no-playlist"]
 
         # خيارات إضافية
         cmd += [
-            "--no-playlist",           # فيديو واحد فقط
             "--no-check-certificates",
             "--merge-output-format", "mp4",  # دمج في MP4
             "--embed-thumbnail",       # إضافة الصورة المصغرة
@@ -188,8 +202,11 @@ class DownloadHandler(BaseHTTPRequestHandler):
         # إضافة الرابط
         cmd.append(url)
 
-        print(f"\n[Download] بدء تحميل: {url}")
+        mode_text = "بلايلست" if is_playlist else "فيديو واحد"
+        print(f"\n[Download] بدء تحميل ({mode_text}): {url}")
         print(f"[Download] الجودة: {quality}")
+        if is_playlist and playlist_items:
+            print(f"[Download] الفيديوهات: {playlist_items}")
         print(f"[Download] الأمر: {' '.join(cmd)}")
 
         # تشغيل التحميل في thread منفصل
@@ -222,8 +239,72 @@ class DownloadHandler(BaseHTTPRequestHandler):
         self._send_json(200, {
             "success": True,
             "message": "بدأ التحميل! تابع في نافذة السيرفر",
-            "download_dir": DOWNLOAD_DIR
+            "download_dir": DOWNLOAD_DIR,
+            "playlist": is_playlist
         })
+
+    def _handle_playlist_info(self, url, ytdlp_cmd):
+        """جلب معلومات البلايلست (عدد الفيديوهات، العنوان، إلخ)"""
+        cmd = list(ytdlp_cmd) + [
+            "--flat-playlist",
+            "--dump-json",
+            "--no-check-certificates",
+            "--js-runtimes", "node",
+            "--yes-playlist",
+            url
+        ]
+        print(f"\n[Playlist Info] جلب معلومات: {url}")
+
+        try:
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+
+            if process.returncode != 0:
+                err_msg = process.stderr.strip() if process.stderr else "Unknown error"
+                print(f"[Playlist Info] ❌ فشل: {err_msg}")
+                self._send_json(500, {"error": f"فشل جلب معلومات البلايلست: {err_msg}"})
+                return
+
+            # كل سطر هو JSON لفيديو واحد
+            lines = [l.strip() for l in process.stdout.strip().split("\n") if l.strip()]
+            videos = []
+            playlist_title = ""
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                    video_info = {
+                        "title": entry.get("title", "بدون عنوان"),
+                        "url": entry.get("url", ""),
+                        "duration": entry.get("duration"),
+                        "id": entry.get("id", ""),
+                    }
+                    videos.append(video_info)
+                    if not playlist_title:
+                        playlist_title = entry.get("playlist_title", "")
+                except json.JSONDecodeError:
+                    continue
+
+            print(f"[Playlist Info] ✅ وجدنا {len(videos)} فيديو في '{playlist_title}'")
+            self._send_json(200, {
+                "success": True,
+                "playlist_title": playlist_title,
+                "count": len(videos),
+                "videos": videos[:200],  # حد أقصى 200 فيديو في المعلومات
+            })
+
+        except subprocess.TimeoutExpired:
+            print("[Playlist Info] ❌ انتهت المهلة")
+            self._send_json(500, {"error": "انتهت المهلة! البلايلست كبيرة جداً"})
+        except Exception as e:
+            print(f"[Playlist Info] ❌ خطأ: {e}")
+            self._send_json(500, {"error": str(e)})
 
 
 def main():

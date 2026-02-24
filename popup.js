@@ -40,7 +40,14 @@ document.getElementById('scanBtn').addEventListener('click', async () => {
 
         const currentSite = detectCurrentSite(tab.url);
 
-        // ===== لو YouTube — نعرض واجهة التحميل بـ yt-dlp مباشرة =====
+        // ===== لو YouTube بلايلست =====
+        if (currentSite === 'youtube' && isYoutubePlaylist(tab.url)) {
+            const pageTitle = await getPageTitle(tab.id);
+            showPlaylistDownload(status, tab.url, pageTitle);
+            return;
+        }
+
+        // ===== لو YouTube فيديو واحد =====
         if (currentSite === 'youtube') {
             const pageTitle = await getPageTitle(tab.id);
             showYoutubeDownload(status, tab.url, pageTitle);
@@ -433,4 +440,293 @@ function detectCurrentSite(url) {
     if (url.includes('twitter.com') || url.includes('x.com')) return 'twitter';
     if (url.includes('facebook.com') || url.includes('fb.com')) return 'facebook';
     return null;
+}
+
+// ===== هل الرابط بلايلست YouTube =====
+function isYoutubePlaylist(url) {
+    try {
+        const u = new URL(url);
+        return u.searchParams.has('list');
+    } catch { return false; }
+}
+
+
+// ===== جلب معلومات البلايلست من السيرفر =====
+async function fetchPlaylistInfo(url) {
+    const resp = await fetch(`${PYTHON_SERVER}/playlist-info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+        signal: AbortSignal.timeout(35000)
+    });
+    return await resp.json();
+}
+
+// ===== واجهة تحميل البلايلست =====
+async function showPlaylistDownload(status, playlistUrl, pageTitle) {
+    status.innerHTML = '';
+
+    const badge = document.createElement('div');
+    badge.className = 'site-badge';
+    badge.textContent = '🎵 YouTube Playlist';
+    status.appendChild(badge);
+
+    const titleEl = document.createElement('p');
+    titleEl.style.cssText = 'font-size:12px;font-weight:600;color:#333;margin:8px 0 4px;line-height:1.4;';
+    titleEl.textContent = pageTitle || playlistUrl;
+    status.appendChild(titleEl);
+
+    if (!serverOnline) {
+        const warn = document.createElement('div');
+        warn.style.cssText = 'background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px;margin:8px 0;font-size:12px;color:#856404;text-align:right;line-height:1.6;';
+        warn.innerHTML = `
+            <b>⚠️ سيرفر التحميل مطفي!</b><br>
+            شغّل <b>start_server.bat</b> أولاً
+        `;
+        status.appendChild(warn);
+        return;
+    }
+
+    // عرض رسالة تحميل المعلومات
+    const loadingEl = document.createElement('div');
+    loadingEl.style.cssText = 'text-align:center;padding:15px;color:#666;font-size:13px;';
+    loadingEl.textContent = '⏳ جاري جلب معلومات البلايلست...';
+    status.appendChild(loadingEl);
+
+    try {
+        const info = await fetchPlaylistInfo(playlistUrl);
+        loadingEl.remove();
+
+        if (!info.success) {
+            throw new Error(info.error || 'فشل جلب المعلومات');
+        }
+
+        // عدد الفيديوهات
+        const countEl = document.createElement('div');
+        countEl.style.cssText = 'font-size:13px;font-weight:bold;color:#155724;background:#d4edda;padding:8px 12px;border-radius:8px;margin:8px 0;';
+        countEl.textContent = `🎬 ${info.playlist_title || 'بلايلست'} — ${info.count} فيديو`;
+        status.appendChild(countEl);
+
+        // بطاقة التحميل
+        const card = document.createElement('div');
+        card.className = 'media-card card-network';
+
+        // اختيار الجودة
+        const hintQ = document.createElement('div');
+        hintQ.style.cssText = 'font-size:11px;color:#888;margin-bottom:6px;';
+        hintQ.textContent = 'اختر الجودة:';
+        card.appendChild(hintQ);
+
+        const qualityRow = document.createElement('div');
+        qualityRow.className = 'quality-row';
+        const qualities = [
+            { label: '🎬 أفضل جودة', value: 'best' },
+            { label: '720p', value: '720' },
+            { label: '480p', value: '480' },
+            { label: '360p', value: '360' },
+            { label: '🔊 صوت MP3', value: 'audio' },
+        ];
+        let selectedQuality = 'best';
+
+        qualities.forEach(q => {
+            const btn = document.createElement('button');
+            btn.className = `q-btn${q.value === 'audio' ? ' audio-btn' : ''}${q.value === 'best' ? ' q-selected' : ''}`;
+            btn.textContent = q.label;
+            btn.addEventListener('click', () => {
+                qualityRow.querySelectorAll('.q-btn').forEach(b => b.classList.remove('q-selected'));
+                btn.classList.add('q-selected');
+                selectedQuality = q.value;
+            });
+            qualityRow.appendChild(btn);
+        });
+        card.appendChild(qualityRow);
+
+        // اختيار النطاق
+        const rangeSection = document.createElement('div');
+        rangeSection.style.cssText = 'margin-top:10px;';
+
+        const rangeLabel = document.createElement('div');
+        rangeLabel.style.cssText = 'font-size:11px;color:#888;margin-bottom:4px;';
+        rangeLabel.textContent = `نطاق الفيديوهات (اختياري — اتركه فارغ لتحميل الكل):`;
+        rangeSection.appendChild(rangeLabel);
+
+        const rangeInput = document.createElement('input');
+        rangeInput.type = 'text';
+        rangeInput.placeholder = `مثل: 1-10 أو 1,3,5 أو 1-5,8,10-12`;
+        rangeInput.style.cssText = 'width:100%;padding:6px 10px;border:1px solid #dee2e6;border-radius:6px;font-size:12px;direction:ltr;text-align:left;box-sizing:border-box;';
+        rangeSection.appendChild(rangeInput);
+        card.appendChild(rangeSection);
+
+        // أزرار التحميل
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex;gap:6px;margin-top:10px;';
+
+        const dlAllBtn = document.createElement('button');
+        dlAllBtn.className = 'action-btn green-btn';
+        dlAllBtn.style.cssText += 'flex:1;';
+        dlAllBtn.textContent = `⬇️ تحميل الكل (${info.count})`;
+        dlAllBtn.addEventListener('click', () => {
+            const items = rangeInput.value.trim();
+            downloadPlaylist(dlAllBtn, playlistUrl, selectedQuality, items, info.count);
+        });
+        btnRow.appendChild(dlAllBtn);
+        card.appendChild(btnRow);
+
+        // حالة التحميل
+        const dlStatus = document.createElement('div');
+        dlStatus.id = 'plDlStatus';
+        dlStatus.style.cssText = 'margin-top:8px;font-size:12px;color:#666;display:none;';
+        card.appendChild(dlStatus);
+
+        status.appendChild(card);
+
+        // قائمة الفيديوهات
+        if (info.videos && info.videos.length > 0) {
+            const listHeader = document.createElement('div');
+            listHeader.style.cssText = 'font-size:12px;font-weight:bold;color:#555;margin-top:10px;margin-bottom:4px;';
+            listHeader.textContent = `📋 قائمة الفيديوهات:`;
+            status.appendChild(listHeader);
+
+            const listContainer = document.createElement('div');
+            listContainer.style.cssText = 'max-height:180px;overflow-y:auto;border:1px solid #e9ecef;border-radius:8px;background:#fff;';
+
+            info.videos.forEach((v, i) => {
+                const row = document.createElement('div');
+                row.style.cssText = `padding:6px 10px;font-size:11px;color:#444;border-bottom:1px solid #f0f0f0;direction:ltr;text-align:left;display:flex;gap:6px;align-items:center;${i%2===0?'background:#fafafa;':''}`;
+
+                const numSpan = document.createElement('span');
+                numSpan.style.cssText = 'font-weight:bold;color:#007bff;min-width:24px;flex-shrink:0;';
+                numSpan.textContent = `${i + 1}.`;
+                row.appendChild(numSpan);
+
+                const titleSpan = document.createElement('span');
+                titleSpan.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+                titleSpan.textContent = v.title || 'بدون عنوان';
+                row.appendChild(titleSpan);
+
+                if (v.duration) {
+                    const durSpan = document.createElement('span');
+                    durSpan.style.cssText = 'color:#888;font-size:10px;flex-shrink:0;';
+                    const m = Math.floor(v.duration / 60);
+                    const s = Math.floor(v.duration % 60);
+                    durSpan.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+                    row.appendChild(durSpan);
+                }
+
+                listContainer.appendChild(row);
+            });
+
+            status.appendChild(listContainer);
+        }
+
+    } catch (err) {
+        loadingEl.remove();
+        const errEl = document.createElement('div');
+        errEl.style.cssText = 'background:#f8d7da;border:1px solid #f5c6cb;border-radius:8px;padding:10px;margin:8px 0;font-size:12px;color:#721c24;text-align:right;';
+        errEl.textContent = `❌ ${err.message}`;
+        status.appendChild(errEl);
+
+        // Fallback: عرض تحميل مباشر بدون معلومات
+        showPlaylistFallback(status, playlistUrl);
+    }
+}
+
+
+// ===== Fallback بلايلست بدون معلومات =====
+function showPlaylistFallback(status, playlistUrl) {
+    const card = document.createElement('div');
+    card.className = 'media-card card-network';
+
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:12px;color:#666;margin-bottom:8px;';
+    msg.textContent = '💡 يمكنك تحميل البلايلست مباشرة:';
+    card.appendChild(msg);
+
+    const qualityRow = document.createElement('div');
+    qualityRow.className = 'quality-row';
+    let selectedQuality = 'best';
+    [{ label: '🎬 أفضل', value: 'best' }, { label: '720p', value: '720' }, { label: '480p', value: '480' }, { label: '🔊 MP3', value: 'audio' }].forEach(q => {
+        const btn = document.createElement('button');
+        btn.className = `q-btn${q.value === 'best' ? ' q-selected' : ''}`;
+        btn.textContent = q.label;
+        btn.addEventListener('click', () => {
+            qualityRow.querySelectorAll('.q-btn').forEach(b => b.classList.remove('q-selected'));
+            btn.classList.add('q-selected');
+            selectedQuality = q.value;
+        });
+        qualityRow.appendChild(btn);
+    });
+    card.appendChild(qualityRow);
+
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'action-btn green-btn';
+    dlBtn.style.cssText += 'margin-top:8px;';
+    dlBtn.textContent = '⬇️ تحميل البلايلست كاملة';
+    dlBtn.addEventListener('click', () => downloadPlaylist(dlBtn, playlistUrl, selectedQuality, '', 0));
+    card.appendChild(dlBtn);
+
+    const dlStatus = document.createElement('div');
+    dlStatus.id = 'plDlStatus';
+    dlStatus.style.cssText = 'margin-top:8px;font-size:12px;color:#666;display:none;';
+    card.appendChild(dlStatus);
+
+    status.appendChild(card);
+}
+
+
+// ===== تحميل البلايلست =====
+async function downloadPlaylist(btn, url, quality, playlistItems, totalCount) {
+    const dlStatus = document.getElementById('plDlStatus');
+    const originalText = btn.textContent;
+
+    btn.disabled = true;
+    btn.textContent = '⏳ جاري...';
+    btn.style.opacity = '0.7';
+
+    if (dlStatus) {
+        dlStatus.style.display = 'block';
+        dlStatus.textContent = '📡 إرسال طلب تحميل البلايلست...';
+    }
+
+    try {
+        const resp = await fetch(`${PYTHON_SERVER}/download`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                url,
+                quality,
+                playlist: true,
+                playlist_items: playlistItems
+            })
+        });
+
+        const data = await resp.json();
+
+        if (data.success) {
+            btn.textContent = '✅ بدأ!';
+            btn.style.background = '#28a745';
+            if (dlStatus) {
+                const itemsText = playlistItems ? `(فيديوهات: ${playlistItems})` : `(كل الفيديوهات${totalCount ? ' - ' + totalCount : ''})`;
+                dlStatus.innerHTML = `✅ ${data.message} ${itemsText}<br><span style="font-size:10px;color:#888;">📁 ${data.download_dir}</span>`;
+            }
+        } else {
+            throw new Error(data.error || 'Unknown error');
+        }
+
+    } catch (err) {
+        btn.textContent = '❌ خطأ';
+        btn.style.background = '#dc3545';
+        if (dlStatus) {
+            dlStatus.textContent = err.message.includes('fetch')
+                ? '🔴 السيرفر مطفي! شغّل start_server.bat'
+                : `❌ ${err.message}`;
+        }
+    }
+
+    setTimeout(() => {
+        btn.textContent = originalText;
+        btn.style.background = '';
+        btn.style.opacity = '1';
+        btn.disabled = false;
+    }, 5000);
 }
