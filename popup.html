@@ -1,0 +1,108 @@
+<!doctype html>
+<html dir="rtl" lang="ar">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bilal Downloader</title>
+    <style>
+      body {
+        width: 320px;
+        padding: 15px;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        text-align: center;
+        background: #fafafa;
+        margin: 0;
+      }
+      h3 { margin: 0 0 12px 0; color: #333; }
+
+      #scanBtn {
+        background: linear-gradient(135deg, #007bff, #0056b3);
+        color: white; border: none;
+        padding: 11px 20px; border-radius: 10px;
+        cursor: pointer; width: 100%;
+        font-size: 14px; font-weight: bold;
+        transition: all 0.2s;
+      }
+      #scanBtn:hover { filter: brightness(1.1); }
+      #scanBtn:active { transform: scale(0.97); }
+
+      #status {
+        margin-top: 12px; color: #333; font-size: 13px;
+        max-height: 420px; overflow-y: auto;
+        text-align: right; white-space: pre-line;
+      }
+
+      /* بطاقة الميديا */
+      .media-card {
+        margin-top: 8px; padding: 10px 12px;
+        border-radius: 10px; text-align: right;
+        border: 1px solid #e9ecef;
+        background: #fff;
+      }
+      .card-video { border-right: 4px solid #007bff; }
+      .card-network { border-right: 4px solid #28a745; background: #f0faf3; }
+      .card-audio { border-right: 4px solid #6f42c1; }
+      .card-blob { border-right: 4px solid #ffc107; }
+
+      .card-title {
+        display: flex; align-items: center; gap: 8px;
+        margin-bottom: 6px; flex-direction: row-reverse;
+      }
+      .badge {
+        font-size: 10px; font-weight: bold;
+        padding: 2px 8px; border-radius: 10px;
+        background: #e9ecef; color: #555;
+        white-space: nowrap; flex-shrink: 0;
+      }
+      .card-network .badge { background: #d4edda; color: #155724; }
+      .card-blob .badge { background: #fff3cd; color: #856404; }
+
+      .filename {
+        font-size: 12px; font-weight: 600; color: #333;
+        overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; direction: ltr; text-align: right;
+        flex: 1;
+      }
+
+      .card-info {
+        font-size: 11px; color: #888;
+        margin-bottom: 6px;
+      }
+
+      /* أزرار */
+      .action-btn {
+        border: none; color: white;
+        padding: 8px 14px; border-radius: 8px;
+        cursor: pointer; font-size: 12px; font-weight: bold;
+        display: block; width: 100%; margin-top: 5px;
+        transition: all 0.2s;
+      }
+      .action-btn:hover { filter: brightness(1.1); }
+      .action-btn:active { transform: scale(0.97); }
+      .green-btn { background: linear-gradient(135deg, #28a745, #1e7e34); }
+
+      .download-link {
+        display: block; margin-top: 5px;
+        color: white; text-decoration: none; font-weight: bold;
+        padding: 8px; border-radius: 8px; font-size: 12px;
+        background: linear-gradient(135deg, #007bff, #0056b3);
+        transition: all 0.2s;
+      }
+      .download-link:hover { filter: brightness(1.1); }
+
+      .site-badge {
+        display: inline-block;
+        padding: 4px 14px; border-radius: 20px;
+        font-size: 12px; font-weight: bold;
+        color: #fff; background: linear-gradient(135deg, #6c5ce7, #a29bfe);
+        margin-bottom: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Bilal Downloader 🚀</h3>
+    <button id="scanBtn">بحث عن فيديو 🔍</button>
+    <div id="status">اضغط للبحث عن رابط الفيديو</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

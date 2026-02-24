@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Bilal Video Downloader",
+  "version": "3.0",
+  "description": "محمل فيديوهات ذكي - يوتيوب، إنستغرام، وغيرها",
+  "permissions": ["activeTab", "scripting", "webRequest", "webNavigation", "storage", "downloads", "declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
