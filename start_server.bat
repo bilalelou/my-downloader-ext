@@ -3,38 +3,38 @@ chcp 65001 >nul
 title Bilal Downloader Server
 echo.
 echo ========================================
-echo   Bilal Downloader - تثبيت وتشغيل
+echo   Bilal Downloader - Setup & Start
 echo ========================================
 echo.
 
-:: فحص Python
+:: Check Python
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ Python غير مثبت!
-    echo حمله من: https://www.python.org/downloads/
+    echo ❌ Python is not installed!
+    echo Download it from: https://www.python.org/downloads/
     echo.
     pause
     exit /b 1
 )
 
-:: فحص وتثبيت yt-dlp
-echo 📦 فحص yt-dlp...
+:: Check and install yt-dlp
+echo 📦 Checking yt-dlp...
 pip show yt-dlp >nul 2>&1
 if %errorlevel% neq 0 (
-    echo 📥 تثبيت yt-dlp...
+    echo 📥 Installing yt-dlp...
     pip install yt-dlp
     echo.
 )
 
-:: تحديث yt-dlp
-echo 🔄 تحديث yt-dlp لآخر نسخة...
+:: Update yt-dlp
+echo 🔄 Updating yt-dlp to latest version...
 pip install -U yt-dlp >nul 2>&1
 
 echo.
-echo ✅ كل شي جاهز! جاري تشغيل السيرفر...
+echo ✅ Everything is ready! Starting server...
 echo.
 
-:: تشغيل السيرفر
+:: Start server
 python "%~dp0download_server.py"
 
 pause

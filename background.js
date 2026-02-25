@@ -1,9 +1,9 @@
 // ===== Bilal Downloader v3 - Background Service Worker =====
-// يعترض طلبات الشبكة الحقيقية ويحفظ روابط الميديا لكل تبويب
+// Intercepts real network requests and saves media URLs for each tab
 
 const capturedMedia = {}; // { tabId: [ {url, filename, size, contentType, detectedBy, quality, site} ] }
 
-// ===== استعادة البيانات من التخزين المؤقت عند بدء SW =====
+// ===== Restore data from session storage on SW startup =====
 async function restoreFromStorage() {
     try {
         const data = await chrome.storage.session.get(null);
@@ -19,17 +19,17 @@ async function restoreFromStorage() {
 }
 restoreFromStorage();
 
-// حفظ البيانات في التخزين المؤقت
+// Save data to session storage
 function persistTab(tabId) {
     if (capturedMedia[tabId]) {
-        chrome.storage.session.set({ [`tab_${tabId}`]: capturedMedia[tabId] }).catch(() => {});
+        chrome.storage.session.set({ [`tab_${tabId}`]: capturedMedia[tabId] }).catch(() => { });
     }
 }
 
-// ===== إعداد قواعد الترويسات للمواقع المعروفة =====
+// ===== Setup header rules for known sites =====
 async function setupHeaderRules() {
     try {
-        // حذف القواعد القديمة أولاً
+        // Remove old rules first
         const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
         const existingIds = existingRules.map(r => r.id);
 
@@ -104,15 +104,15 @@ async function setupHeaderRules() {
 }
 setupHeaderRules();
 
-// ===== تنظيف رابط YouTube للتحميل الكامل =====
+// ===== Clean YouTube URL for full download =====
 function cleanYoutubeUrl(url) {
     try {
         const u = new URL(url);
-        // حذف range parameter لتحميل الفيديو كامل
+        // Remove range parameter to download full video
         u.searchParams.delete('range');
-        // حذف rn (request number) لأنه متغير
+        // Remove rn (request number) as it's variable
         u.searchParams.delete('rn');
-        // حذف rbuf
+        // Remove rbuf
         u.searchParams.delete('rbuf');
         return u.toString();
     } catch {
@@ -120,38 +120,38 @@ function cleanYoutubeUrl(url) {
     }
 }
 
-// ===== أنماط الاكتشاف =====
+// ===== Detection patterns =====
 
-// ملفات ميديا بالامتداد
+// Media files by extension
 const MEDIA_URL_PATTERN = /\.(mp4|webm|mkv|m4v|avi|mov|flv|wmv|m3u8|mpd|mp3|m4a|ogg|aac|flac|wav)(\?|#|$)/i;
 
-// Content-Type ميديا
+// Media Content-Type
 const MEDIA_CONTENT_TYPES = /^(video|audio)\//i;
 
-// ===== أنماط خاصة بالمواقع =====
+// ===== Site-specific patterns =====
 
-// يوتيوب: الفيديو يجي من googlevideo.com/videoplayback
+// YouTube: video comes from googlevideo.com/videoplayback
 const YOUTUBE_VIDEO_PATTERN = /googlevideo\.com\/videoplayback/i;
 
-// إنستغرام: الفيديو يجي من CDN
+// Instagram: video comes from CDN
 const INSTAGRAM_VIDEO_PATTERN = /(cdninstagram\.com|fbcdn\.net|instagram\.com).*\.(mp4|m4v)/i;
 const INSTAGRAM_MEDIA_PATTERN = /(cdninstagram\.com|fbcdn\.net).*video/i;
 
-// فيسبوك
+// Facebook
 const FACEBOOK_VIDEO_PATTERN = /(fbcdn\.net|fbvideo|facebook\.com).*video/i;
 
-// تويتر/X
+// Twitter/X
 const TWITTER_VIDEO_PATTERN = /(twimg\.com|video\.twimg).*\.(mp4|m3u8)/i;
 
-// تيك توك
+// TikTok
 const TIKTOK_VIDEO_PATTERN = /(tiktokcdn\.com|musical\.ly|byteoversea|tiktok).*video/i;
 
-// استخراج اسم الملف من الرابط
+// Extract filename from URL
 function extractFilename(url, site) {
     try {
         const u = new URL(url);
 
-        // أسماء مخصصة حسب الموقع
+        // Custom names per site
         if (site === 'youtube') {
             const itag = u.searchParams.get('itag') || '';
             const mime = u.searchParams.get('mime') || '';
@@ -168,7 +168,7 @@ function extractFilename(url, site) {
         if (site === 'twitter') return 'twitter_video';
         if (site === 'facebook') return 'facebook_video';
 
-        // عام: استخرج اسم الملف من المسار
+        // General: extract filename from path
         const pathParts = u.pathname.split('/').filter(Boolean);
         const last = pathParts[pathParts.length - 1] || '';
         const decoded = decodeURIComponent(last);
@@ -181,9 +181,9 @@ function extractFilename(url, site) {
     }
 }
 
-// استخراج الامتداد
+// Extract file extension
 function extractExtension(url, contentType) {
-    // من Content-Type أولاً
+    // From Content-Type first
     if (contentType) {
         if (contentType.includes('mp4') || contentType.includes('m4v')) return 'mp4';
         if (contentType.includes('webm')) return 'webm';
@@ -191,12 +191,12 @@ function extractExtension(url, contentType) {
         if (contentType.includes('ogg')) return 'ogg';
         if (contentType.includes('mp4') && contentType.includes('audio')) return 'm4a';
     }
-    // من الرابط
+    // From URL
     const match = url.match(/\.(mp4|webm|mkv|m4v|avi|mov|flv|wmv|mp3|m4a|ogg|aac|flac|wav|m3u8|mpd)(\?|#|$)/i);
     return match ? match[1].toLowerCase() : null;
 }
 
-// استخراج جودة يوتيوب من itag
+// Extract YouTube quality from itag
 function getYoutubeQuality(url) {
     try {
         const u = new URL(url);
@@ -204,7 +204,7 @@ function getYoutubeQuality(url) {
         const quality = u.searchParams.get('quality') || '';
         const mime = u.searchParams.get('mime') || '';
 
-        // أشهر itags
+        // Common itags
         const itagMap = {
             '18': '360p', '22': '720p', '37': '1080p', '38': '4K',
             '133': '240p', '134': '360p', '135': '480p', '136': '720p',
@@ -225,7 +225,7 @@ function getYoutubeQuality(url) {
     }
 }
 
-// تحديد الموقع من الرابط
+// Detect site from URL
 function detectSite(url) {
     if (YOUTUBE_VIDEO_PATTERN.test(url)) return 'youtube';
     if (INSTAGRAM_VIDEO_PATTERN.test(url) || INSTAGRAM_MEDIA_PATTERN.test(url)) return 'instagram';
@@ -235,40 +235,40 @@ function detectSite(url) {
     return null;
 }
 
-// ===== اعتراض الطلبات =====
+// ===== Intercept requests =====
 chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
         if (details.tabId < 0) return;
         const url = details.url;
         if (!url || url.startsWith('chrome') || url.startsWith('about')) return;
 
-        // فحص الامتداد
+        // Check file extension
         if (MEDIA_URL_PATTERN.test(url)) {
             const site = detectSite(url);
             addCapturedUrl(details.tabId, url, 'url-pattern', null, null, site);
         }
 
-        // فحص يوتيوب
+        // Check YouTube
         if (YOUTUBE_VIDEO_PATTERN.test(url)) {
             addCapturedUrl(details.tabId, url, 'youtube-videoplayback', null, null, 'youtube');
         }
 
-        // فحص إنستغرام
+        // Check Instagram
         if (INSTAGRAM_VIDEO_PATTERN.test(url) || INSTAGRAM_MEDIA_PATTERN.test(url)) {
             addCapturedUrl(details.tabId, url, 'instagram-cdn', null, null, 'instagram');
         }
 
-        // فحص تيك توك
+        // Check TikTok
         if (TIKTOK_VIDEO_PATTERN.test(url)) {
             addCapturedUrl(details.tabId, url, 'tiktok-cdn', null, null, 'tiktok');
         }
 
-        // فحص تويتر
+        // Check Twitter
         if (TWITTER_VIDEO_PATTERN.test(url)) {
             addCapturedUrl(details.tabId, url, 'twitter-cdn', null, null, 'twitter');
         }
 
-        // فحص فيسبوك
+        // Check Facebook
         if (FACEBOOK_VIDEO_PATTERN.test(url)) {
             addCapturedUrl(details.tabId, url, 'facebook-cdn', null, null, 'facebook');
         }
@@ -276,7 +276,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     { urls: ["<all_urls>"] }
 );
 
-// اعتراض الردود - Content-Type + حجم
+// Intercept responses - Content-Type + size
 chrome.webRequest.onHeadersReceived.addListener(
     (details) => {
         if (details.tabId < 0) return;
@@ -287,7 +287,7 @@ chrome.webRequest.onHeadersReceived.addListener(
         const contentRange = headers.find(h => h.name.toLowerCase() === 'content-range')?.value || '';
         let size = parseInt(contentLength) || 0;
 
-        // لو فيه Content-Range، الحجم الكلي يكون بعد "/"
+        // If Content-Range exists, total size is after "/"
         if (contentRange) {
             const totalMatch = contentRange.match(/\/(\d+)/);
             if (totalMatch) size = parseInt(totalMatch[1]) || size;
@@ -295,13 +295,13 @@ chrome.webRequest.onHeadersReceived.addListener(
 
         const site = detectSite(details.url);
 
-        // لو Content-Type ميديا
+        // If Content-Type is media
         if (MEDIA_CONTENT_TYPES.test(contentType)) {
             addCapturedUrl(details.tabId, details.url, 'content-type', contentType, size, site);
             return;
         }
 
-        // لو ملف كبير (> 300KB) وفيه إشارة للميديا
+        // If large file (> 300KB) with media indicators
         if (size > 307200) {
             const urlLower = details.url.toLowerCase();
             if (urlLower.includes('video') || urlLower.includes('media') || urlLower.includes('stream') ||
@@ -314,43 +314,43 @@ chrome.webRequest.onHeadersReceived.addListener(
     ["responseHeaders"]
 );
 
-// ===== حفظ الروابط =====
+// ===== Save captured URLs =====
 function addCapturedUrl(tabId, url, detectedBy, contentType, size, site) {
     if (!capturedMedia[tabId]) {
         capturedMedia[tabId] = [];
     }
 
-    // تجاهل الصور والأصول
+    // Skip images and static assets
     const skipPatterns = /\.(jpg|jpeg|png|gif|svg|ico|webp|css|js|woff|woff2|ttf|eot|json|xml|txt)(\?|#|$)/i;
     if (skipPatterns.test(url)) return;
 
-    // تجاهل أجزاء HLS/DASH الصغيرة
+    // Skip small HLS/DASH segments
     const isSegment = /\.(ts|m4s)(\?|#|$)/i.test(url);
-    // لو يوتيوب + range request لجزء صغير، تجاهل
+    // For YouTube + small range requests, skip (probe requests)
     if (site === 'youtube') {
         try {
             const u = new URL(url);
             const range = u.searchParams.get('range');
             if (range) {
                 const [start, end] = range.split('-').map(Number);
-                // لو حجم القطعة أقل من 100KB، تجاهل (هذي probe requests)
+                // If chunk size is less than 100KB, skip (probe requests)
                 if (end - start < 102400) return;
             }
         } catch { /* ignore */ }
     }
 
-    // تجنب التكرار (للروابط الأساسية بدون range params)
+    // Avoid duplicates (compare base URLs without range params)
     const baseUrl = getBaseUrl(url, site);
     const existing = capturedMedia[tabId].find(item => getBaseUrl(item.url, item.site) === baseUrl);
     if (existing) {
-        // حدث المعلومات
+        // Update info
         if (size && size > (existing.size || 0)) existing.size = size;
         if (contentType && !existing.contentType) existing.contentType = contentType;
         if (!existing.site && site) existing.site = site;
         return;
     }
 
-    // معلومات إضافية حسب الموقع
+    // Additional site-specific info
     let quality = '';
     let isAudio = false;
     if (site === 'youtube') {
@@ -373,47 +373,47 @@ function addCapturedUrl(tabId, url, detectedBy, contentType, size, site) {
         timestamp: Date.now()
     });
 
-    // أقصى 200 رابط
+    // Max 200 URLs per tab
     if (capturedMedia[tabId].length > 200) {
         capturedMedia[tabId] = capturedMedia[tabId].slice(-200);
     }
 
-    // حفظ في التخزين المؤقت (يبقى حتى لو SW انطفأ)
+    // Persist to session storage (survives SW restarts)
     persistTab(tabId);
 }
 
-// استخراج الرابط الأساسي (بدون range وأشياء متغيرة)
+// Extract base URL (without range and variable params)
 function getBaseUrl(url, site) {
     try {
         const u = new URL(url);
         if (site === 'youtube') {
-            // لروابط يوتيوب، نقارن بالـ itag + id
+            // For YouTube URLs, compare by itag + id
             const itag = u.searchParams.get('itag') || '';
             const id = u.searchParams.get('id') || u.pathname;
             return `yt:${id}:${itag}`;
         }
-        // للباقي، استخدم الهوست + المسار
+        // For others, use host + path
         return u.origin + u.pathname;
     } catch {
         return url;
     }
 }
 
-// تنظيف لما التبويب ينقفل
+// Cleanup when tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
     delete capturedMedia[tabId];
-    chrome.storage.session.remove(`tab_${tabId}`).catch(() => {});
+    chrome.storage.session.remove(`tab_${tabId}`).catch(() => { });
 });
 
-// تنظيف لما التبويب يتنقل لصفحة جديدة
+// Cleanup when tab navigates to a new page
 chrome.webNavigation.onCommitted.addListener((details) => {
     if (details.frameId === 0) {
         delete capturedMedia[details.tabId];
-        chrome.storage.session.remove(`tab_${details.tabId}`).catch(() => {});
+        chrome.storage.session.remove(`tab_${details.tabId}`).catch(() => { });
     }
 });
 
-// ترتيب الميديا
+// Sort media by size and timestamp
 function getSortedMedia(tabId) {
     const urls = capturedMedia[tabId] || [];
     const sorted = [...urls]
@@ -425,14 +425,14 @@ function getSortedMedia(tabId) {
     return sorted.length > 0 ? sorted : urls;
 }
 
-// ===== التواصل مع popup =====
+// ===== Communication with popup =====
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
-    // ===== تحميل ميديا مع ترويسات صحيحة =====
+    // ===== Download media with correct headers =====
     if (message.action === 'downloadMedia') {
         const { url, filename, site } = message;
 
-        // تنظيف الرابط حسب الموقع
+        // Clean URL based on site
         let cleanUrl = url;
         if (site === 'youtube') {
             cleanUrl = cleanYoutubeUrl(url);
@@ -454,11 +454,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'getCapturedMedia') {
         const tabId = message.tabId;
 
-        // لو البيانات موجودة في الذاكرة
+        // If data exists in memory
         if (capturedMedia[tabId] && capturedMedia[tabId].length > 0) {
             sendResponse({ urls: getSortedMedia(tabId) });
         } else {
-            // استرجاع من التخزين المؤقت (لو SW انطفأ ورجع)
+            // Restore from session storage (if SW was restarted)
             chrome.storage.session.get(`tab_${tabId}`).then(data => {
                 const stored = data[`tab_${tabId}`];
                 if (stored && Array.isArray(stored)) {
@@ -474,7 +474,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (message.action === 'clearCapturedMedia') {
         delete capturedMedia[message.tabId];
-        chrome.storage.session.remove(`tab_${message.tabId}`).catch(() => {});
+        chrome.storage.session.remove(`tab_${message.tabId}`).catch(() => { });
         sendResponse({ success: true });
         return true;
     }
