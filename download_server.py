@@ -12,12 +12,16 @@ import os
 import subprocess
 import threading
 import re
+import socket
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import unquote
 
 # Download directory
 DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 PORT = 9876
+NOT_FOUND = "not found"
+YTDLP_INSTALL_CMD = "pip install yt-dlp"
 
 
 def find_ytdlp():
@@ -82,6 +86,197 @@ def get_ytdlp_cmd():
 
 _ytdlp_cache = find_ytdlp()
 
+MAX_NETWORK_WAIT = 300  # Max seconds to wait for network (5 min)
+NETWORK_CHECK_INTERVAL = 10  # Seconds between connectivity checks
+FAILED_ITEM_RETRY_DELAY = 15  # Seconds to wait before retrying failed items
+MAX_RETRY_ROUNDS = 3  # Max retry rounds for failed playlist items
+
+
+def get_quality_args(quality):
+    """Build yt-dlp quality selection arguments."""
+    if quality == "audio":
+        return ["-f", "bestaudio", "-x", "--audio-format", "mp3"]
+    if quality == "best":
+        return ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"]
+    if quality in ("720", "480", "360"):
+        return ["-f", f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"]
+    return ["-f", "best[ext=mp4]/best"]
+
+
+def get_output_args(is_playlist, playlist_items):
+    """Build yt-dlp output path and playlist mode arguments."""
+    if is_playlist:
+        args = [
+            "-o", os.path.join(DOWNLOAD_DIR, "%(playlist_title)s", "%(playlist_index)03d - %(title)s.%(ext)s"),
+            "--yes-playlist",
+        ]
+        if playlist_items:
+            args += ["--playlist-items", playlist_items]
+        return args
+    return [
+        "-o", os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
+        "--no-playlist",
+    ]
+
+
+def get_common_ytdlp_args():
+    """Build common yt-dlp arguments used for both regular and retry downloads."""
+    return [
+        "--no-check-certificates",
+        "--merge-output-format", "mp4",
+        "--embed-thumbnail",
+        "--add-metadata",
+        "--js-runtimes", "node",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--retry-sleep", "exp=1:2:60",
+    ]
+
+
+def build_download_command(ytdlp_cmd, url, quality, is_playlist, playlist_items):
+    """Build full yt-dlp command for a download request."""
+    cmd = list(ytdlp_cmd)
+    cmd += get_quality_args(quality)
+    cmd += get_output_args(is_playlist, playlist_items)
+    cmd += get_common_ytdlp_args()
+    cmd.append(url)
+    return cmd
+
+
+def build_retry_command(ytdlp_cmd, vid_url, quality):
+    """Build yt-dlp command for retrying a single playlist item."""
+    retry_cmd = list(ytdlp_cmd)
+    retry_cmd += get_quality_args(quality)
+    retry_cmd += [
+        "-o", os.path.join(DOWNLOAD_DIR, "%(playlist_title)s", "%(playlist_index)03d - %(title)s.%(ext)s"),
+        "--no-playlist",
+    ]
+    retry_cmd += get_common_ytdlp_args()
+    retry_cmd.append(vid_url)
+    return retry_cmd
+
+
+def run_download_job(cmd, ytdlp_cmd, quality, is_playlist):
+    """Run yt-dlp download command and retry failed playlist items on network errors."""
+    try:
+        failed_ids = []
+        network_error_pattern = re.compile(
+            r'ERROR:.*?(\w{11}):.*?(getaddrinfo failed|Network is unreachable|Connection refused|timed out|Connection reset|URLError)',
+            re.IGNORECASE
+        )
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        )
+        for line in process.stdout:
+            line = line.strip()
+            if line:
+                print(f"  [yt-dlp] {line}")
+                match = network_error_pattern.search(line)
+                if match:
+                    video_id = match.group(1)
+                    if video_id not in failed_ids:
+                        failed_ids.append(video_id)
+        process.wait()
+
+        if process.returncode == 0:
+            print("[Download] ✅ Download completed successfully!")
+        else:
+            print(f"[Download] ❌ Download failed (code: {process.returncode})")
+
+        if failed_ids and is_playlist:
+            print(f"\n[Retry] {len(failed_ids)} video(s) failed due to network errors: {failed_ids}")
+            retry_round = 0
+            while failed_ids and retry_round < MAX_RETRY_ROUNDS:
+                retry_round += 1
+                print(f"\n[Retry] === Round {retry_round}/{MAX_RETRY_ROUNDS} ===")
+                print(f"[Retry] Waiting {FAILED_ITEM_RETRY_DELAY}s before retrying...")
+                time.sleep(FAILED_ITEM_RETRY_DELAY)
+
+                if not check_network():
+                    print("[Retry] ⚠️ No internet connection detected")
+                    if not wait_for_network():
+                        print("[Retry] ❌ Giving up - no internet")
+                        break
+
+                still_failed = []
+                for vid_id in failed_ids:
+                    vid_url = f"https://www.youtube.com/watch?v={vid_id}"
+                    print(f"\n[Retry] Retrying: {vid_url}")
+
+                    retry_cmd = build_retry_command(ytdlp_cmd, vid_url, quality)
+                    retry_proc = subprocess.Popen(
+                        retry_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                    )
+                    retry_had_error = False
+                    for rline in retry_proc.stdout:
+                        rline = rline.strip()
+                        if rline:
+                            print(f"  [yt-dlp] {rline}")
+                            if network_error_pattern.search(rline):
+                                retry_had_error = True
+                    retry_proc.wait()
+
+                    if retry_proc.returncode == 0:
+                        print(f"[Retry] ✅ {vid_id} downloaded successfully!")
+                    else:
+                        print(f"[Retry] ❌ {vid_id} still failed")
+                        still_failed.append(vid_id)
+                        if retry_had_error and not check_network():
+                            print("[Retry] ⚠️ Network down again, waiting...")
+                            if not wait_for_network():
+                                still_failed.extend([v for v in failed_ids if v not in still_failed and v != vid_id])
+                                break
+
+                failed_ids = still_failed
+
+            if failed_ids:
+                print(f"\n[Retry] ❌ {len(failed_ids)} video(s) could not be downloaded after all retries:")
+                for vid_id in failed_ids:
+                    print(f"  - https://www.youtube.com/watch?v={vid_id}")
+            else:
+                print("\n[Retry] ✅ All failed videos recovered successfully!")
+
+    except Exception as e:
+        print(f"[Download] ❌ Error: {e}")
+
+
+def check_network(host="www.youtube.com", port=443, timeout=5):
+    """Check if we can reach YouTube (DNS + TCP)"""
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        return True
+    except (socket.error, OSError):
+        return False
+
+
+def wait_for_network(max_wait=MAX_NETWORK_WAIT):
+    """Wait until network is available. Returns True if restored, False if timed out."""
+    print(f"[Network] ⏳ Waiting for internet connection (up to {max_wait}s)...")
+    elapsed = 0
+    while elapsed < max_wait:
+        if check_network():
+            print(f"[Network] ✅ Connection restored after {elapsed}s")
+            return True
+        time.sleep(NETWORK_CHECK_INTERVAL)
+        elapsed += NETWORK_CHECK_INTERVAL
+        print(f"[Network] Still waiting... ({elapsed}s / {max_wait}s)")
+    print(f"[Network] ❌ No connection after {max_wait}s")
+    return False
+
 
 class DownloadHandler(BaseHTTPRequestHandler):
     """Download request handler"""
@@ -122,6 +317,187 @@ class DownloadHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"error": "not found"})
 
+    def _handle_download_request(self, body):
+        """Handles the main download logic."""
+        url = body.get("url", "").strip()
+        if not url:
+            self._send_json(400, {"error": "URL is required"})
+            return
+
+        ytdlp_cmd = get_ytdlp_cmd()
+        if not ytdlp_cmd:
+            self._send_json(500, {
+                "error": "yt-dlp not found! Install it with: pip install yt-dlp",
+                "install_cmd": "pip install yt-dlp"
+            })
+            return
+
+        quality = body.get("quality", "best")
+        is_playlist = body.get("playlist", False)
+        playlist_items = body.get("playlist_items", "")
+
+        cmd = list(ytdlp_cmd)
+
+        if quality == "audio":
+            cmd += ["-f", "bestaudio", "-x", "--audio-format", "mp3"]
+        elif quality == "best":
+            cmd += ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"]
+        elif quality in ("720", "480", "360"):
+            cmd += ["-f", f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"]
+        else:
+            cmd += ["-f", "best[ext=mp4]/best"]
+
+        if is_playlist:
+            cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(playlist_title)s", "%(playlist_index)03d - %(title)s.%(ext)s")]
+            cmd += ["--yes-playlist"]
+            if playlist_items:
+                cmd += ["--playlist-items", playlist_items]
+        else:
+            cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")]
+            cmd += ["--no-playlist"]
+
+        cmd += [
+            "--no-check-certificates", "--merge-output-format", "mp4",
+            "--embed-thumbnail", "--add-metadata", "--js-runtimes", "node",
+            "--retries", "10", "--fragment-retries", "10", "--retry-sleep", "exp=1:2:60",
+        ]
+        cmd.append(url)
+
+        mode_text = "playlist" if is_playlist else "single video"
+        print(f"\n[Download] Starting download ({mode_text}): {url}")
+        print(f"[Download] Quality: {quality}")
+        if is_playlist and playlist_items:
+            print(f"[Download] Videos: {playlist_items}")
+        print(f"[Download] Command: {' '.join(cmd)}")
+
+        thread = threading.Thread(target=self._run_download_thread, args=(cmd, quality, is_playlist), daemon=True)
+        thread.start()
+
+        self._send_json(200, {
+            "success": True,
+            "message": "Download started! Check the server window for progress",
+            "download_dir": DOWNLOAD_DIR,
+            "playlist": is_playlist
+        })
+
+    def _run_download_thread(self, cmd, quality, is_playlist):
+        """The thread that runs the download process."""
+        try:
+            failed_ids = []
+            network_error_pattern = re.compile(
+                r'ERROR:.*?(\w{11}):.*?(getaddrinfo failed|Network is unreachable|Connection refused|timed out|Connection reset|URLError)',
+                re.IGNORECASE
+            )
+
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            for line in process.stdout:
+                line = line.strip()
+                if line:
+                    print(f"  [yt-dlp] {line}")
+                    match = network_error_pattern.search(line)
+                    if match:
+                        video_id = match.group(1)
+                        if video_id not in failed_ids:
+                            failed_ids.append(video_id)
+            process.wait()
+
+            if process.returncode == 0:
+                print("[Download] ✅ Download completed successfully!")
+            else:
+                print(f"[Download] ❌ Download failed (code: {process.returncode})")
+
+            if failed_ids and is_playlist:
+                self._retry_failed_downloads(failed_ids, quality)
+
+        except Exception as e:
+            print(f"[Download] ❌ Error: {e}")
+
+    def _retry_failed_downloads(self, failed_ids, quality):
+        """Retry downloading items that failed due to network issues."""
+        print(f"\n[Retry] {len(failed_ids)} video(s) failed due to network errors: {failed_ids}")
+        retry_round = 0
+        while failed_ids and retry_round < MAX_RETRY_ROUNDS:
+            retry_round += 1
+            print(f"\n[Retry] === Round {retry_round}/{MAX_RETRY_ROUNDS} ===")
+            print(f"[Retry] Waiting {FAILED_ITEM_RETRY_DELAY}s before retrying...")
+            time.sleep(FAILED_ITEM_RETRY_DELAY)
+
+            if not check_network():
+                print("[Retry] ⚠️ No internet connection detected")
+                if not wait_for_network():
+                    print("[Retry] ❌ Giving up - no internet")
+                    break
+
+            failed_ids = self._process_retry_items(failed_ids, quality)
+
+        if failed_ids:
+            print(f"\n[Retry] ❌ {len(failed_ids)} video(s) could not be downloaded after all retries:")
+            for vid_id in failed_ids:
+                print(f"  - https://www.youtube.com/watch?v={vid_id}")
+        else:
+            print("\n[Retry] ✅ All failed videos recovered successfully!")
+
+    def _process_retry_items(self, failed_ids, quality):
+        """Process each item in the retry queue."""
+        still_failed = []
+        network_error_pattern = re.compile(
+            r'ERROR:.*?(\w{11}):.*?(getaddrinfo failed|Network is unreachable|Connection refused|timed out|Connection reset|URLError)',
+            re.IGNORECASE
+        )
+        ytdlp_cmd = get_ytdlp_cmd()
+
+        for vid_id in failed_ids:
+            vid_url = f"https://www.youtube.com/watch?v={vid_id}"
+            print(f"\n[Retry] Retrying: {vid_url}")
+
+            retry_cmd = list(ytdlp_cmd)
+            if quality == "audio":
+                retry_cmd += ["-f", "bestaudio", "-x", "--audio-format", "mp3"]
+            elif quality == "best":
+                retry_cmd += ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"]
+            elif quality in ("720", "480", "360"):
+                retry_cmd += ["-f", f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"]
+            else:
+                retry_cmd += ["-f", "best[ext=mp4]/best"]
+            
+            retry_cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(playlist_title)s", "%(playlist_index)03d - %(title)s.%(ext)s")]
+            retry_cmd += [
+                "--no-playlist", "--no-check-certificates", "--merge-output-format", "mp4",
+                "--embed-thumbnail", "--add-metadata", "--js-runtimes", "node",
+                "--retries", "10", "--fragment-retries", "10", "--retry-sleep", "exp=1:2:60",
+                vid_url
+            ]
+
+            retry_proc = subprocess.Popen(
+                retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            retry_had_error = False
+            for rline in retry_proc.stdout:
+                rline = rline.strip()
+                if rline:
+                    print(f"  [yt-dlp] {rline}")
+                    if network_error_pattern.search(rline):
+                        retry_had_error = True
+            retry_proc.wait()
+
+            if retry_proc.returncode == 0:
+                print(f"[Retry] ✅ {vid_id} downloaded successfully!")
+            else:
+                print(f"[Retry] ❌ {vid_id} still failed")
+                still_failed.append(vid_id)
+                if retry_had_error and not check_network():
+                    print("[Retry] ⚠️ Network down again, waiting...")
+                    if not wait_for_network():
+                        still_failed.extend([v for v in failed_ids if v not in still_failed and v != vid_id])
+                        break
+        return still_failed
+
     def do_POST(self):
         """Handle download requests"""
         if self.path not in ("/download", "/playlist-info"):
@@ -135,113 +511,18 @@ class DownloadHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": f"Invalid request: {e}"})
             return
 
-        url = body.get("url", "").strip()
-        if not url:
-            self._send_json(400, {"error": "URL is required"})
-            return
-
-        # Search for yt-dlp (retries each time)
-        global _ytdlp_cache
-        ytdlp_cmd = get_ytdlp_cmd()
-        if not ytdlp_cmd:
-            # Retry search (may have been installed after server started)
-            _ytdlp_cache = None
-            ytdlp_cmd = get_ytdlp_cmd()
-        if not ytdlp_cmd:
-            self._send_json(500, {
-                "error": "yt-dlp not found! Install it with: pip install yt-dlp",
-                "install_cmd": "pip install yt-dlp"
-            })
-            return
-
-        # ===== Playlist info =====
         if self.path == "/playlist-info":
+            url = body.get("url", "").strip()
+            if not url:
+                self._send_json(400, {"error": "URL is required"})
+                return
+            ytdlp_cmd = get_ytdlp_cmd()
+            if not ytdlp_cmd:
+                self._send_json(500, {"error": "yt-dlp not found!"})
+                return
             self._handle_playlist_info(url, ytdlp_cmd)
-            return
-
-        # Download options
-        quality = body.get("quality", "best")  # best, 720, 480, 360, audio
-        site = body.get("site", "")
-        title = body.get("title", "")
-        is_playlist = body.get("playlist", False)  # Whether to download full playlist
-        playlist_items = body.get("playlist_items", "")  # e.g. "1-5" or "" for all
-
-        # Build yt-dlp command (ytdlp_cmd may be ["yt-dlp.exe"] or ["python", "-m", "yt_dlp"])
-        cmd = list(ytdlp_cmd)
-
-        # Quality selection
-        if quality == "audio":
-            cmd += ["-f", "bestaudio", "-x", "--audio-format", "mp3"]
-        elif quality == "best":
-            cmd += ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"]
-        elif quality in ("720", "480", "360"):
-            cmd += ["-f", f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best"]
-        else:
-            cmd += ["-f", "best[ext=mp4]/best"]
-
-        # Save path
-        if is_playlist:
-            # Subdirectory named after playlist + numbered videos
-            cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(playlist_title)s", "%(playlist_index)03d - %(title)s.%(ext)s")]
-            cmd += ["--yes-playlist"]
-            if playlist_items:
-                cmd += ["--playlist-items", playlist_items]
-        else:
-            cmd += ["-o", os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")]
-            cmd += ["--no-playlist"]
-
-        # Additional options
-        cmd += [
-            "--no-check-certificates",
-            "--merge-output-format", "mp4",  # Merge into MP4
-            "--embed-thumbnail",       # Embed thumbnail
-            "--add-metadata",          # Add metadata
-            "--js-runtimes", "node",     # Use Node.js for YouTube decryption
-        ]
-
-        # Add URL
-        cmd.append(url)
-
-        mode_text = "playlist" if is_playlist else "single video"
-        print(f"\n[Download] Starting download ({mode_text}): {url}")
-        print(f"[Download] Quality: {quality}")
-        if is_playlist and playlist_items:
-            print(f"[Download] Videos: {playlist_items}")
-        print(f"[Download] Command: {' '.join(cmd)}")
-
-        # Run download in a separate thread
-        def run_download():
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                )
-                for line in process.stdout:
-                    line = line.strip()
-                    if line:
-                        print(f"  [yt-dlp] {line}")
-                process.wait()
-                if process.returncode == 0:
-                    print(f"[Download] ✅ Download completed successfully!")
-                else:
-                    print(f"[Download] ❌ Download failed (code: {process.returncode})")
-            except Exception as e:
-                print(f"[Download] ❌ Error: {e}")
-
-        thread = threading.Thread(target=run_download, daemon=True)
-        thread.start()
-
-        self._send_json(200, {
-            "success": True,
-            "message": "Download started! Check the server window for progress",
-            "download_dir": DOWNLOAD_DIR,
-            "playlist": is_playlist
-        })
+        elif self.path == "/download":
+            self._handle_download_request(body)
 
     def _handle_playlist_info(self, url, ytdlp_cmd):
         """Fetch playlist info (video count, title, etc.)"""
